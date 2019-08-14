@@ -11,7 +11,7 @@ from ncmime import ncmime
 from collections import Counter
 
 ZEROS = Counter(range(256)) # ones, so never-seen bytes have defined entropy
-def add(counter, key):
+def add(counter, key, counts):
 	counter[key] = counter.get(key, ZEROS) + counts
 def entropy(counter):
 	return { mime: [-log2(counts[byte] / sum(counts.values()))
@@ -25,8 +25,8 @@ for dir in sys.argv[1:]:
 		path = os.path.join(dir, file)
 		with io.open(path, 'rb') as infile:
 			counts = Counter(infile.read())
-		add(ncstats, ncmime(path))
-		add(magicstats, magyc.from_file(path))
+		add(ncstats, ncmime(path), counts)
+		add(magicstats, magyc.from_file(path), counts)
 
 def dump(basename, stats):
 	with io.open(basename + '.json', 'w') as outfile:
