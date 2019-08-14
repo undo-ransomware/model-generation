@@ -1,0 +1,7 @@
+mimetypealiases.dist.json
+mimetypemapping.dist.json
+magicbaseline.json
+ncbaseline.json
+magic.pdf
+nc.pdf
+__pycache__/
