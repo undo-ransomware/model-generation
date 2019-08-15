@@ -10,7 +10,7 @@ def plot(entropy, mime, pdf):
 	pyplot.figure(figsize=(12, 10))
 	pyplot.ylabel('entropy')
 	pyplot.xlabel('byte value')
-	pyplot.title('Entropy distribution for ' + mime)
+	pyplot.title(mime)
 	pyplot.bar(np.arange(256), entropy, 1.15)
 	pdf.savefig()
 	pyplot.close()

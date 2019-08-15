@@ -1,5 +1,6 @@
 mimetypealiases.dist.json
 mimetypemapping.dist.json
+baselines.sqlite
 magicbaseline.json
 ncbaseline.json
 magic.pdf
