@@ -15,7 +15,7 @@ def plot(entropy, mime, pdf):
 	pdf.savefig()
 	pyplot.close()
 
-for base in 'nc', 'magic':
+for base in 'nc', 'magic', 'name':
 	with io.open(base + 'baseline.json', 'r') as infile:
 		data = json.load(infile)
 	with PdfPages(base + '.pdf') as pdf:

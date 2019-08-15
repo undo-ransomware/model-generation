@@ -12,18 +12,20 @@ from ncmime import ncmime
 from collections import Counter
 
 db = sqlite3.connect('baselines.sqlite')
-db.execute('create table if not exists counts' +
-		'(type next, path text, mime text, byte integer, count integer)')
+# order of index columns carefully chosen so the the two "group by" queries can
+# directly do a linear scan of the table, without sorting.
+db.execute('''create table if not exists counts(
+		kind text, mime text, byte integer, path text, count integer,
+		primary key(kind, mime, byte, path))''')
 
 ZEROS = Counter(range(256)) # ones, so never-seen bytes have defined entropy
 def add(counter, key, counts):
 	counter[key] = counter.get(key, ZEROS) + counts
 
-def record(type, path, stats):
-	db.executemany('''insert into counts(type, path, mime, byte, count)
-			values(?, ?, ?, ?, ?)''', [(type, path, mime, byte, count)
+def record(kind, path, stats):
+	db.executemany('''insert into counts(kind, path, mime, byte, count)
+			values(?, ?, ?, ?, ?)''', [(kind, path, mime, byte, count)
 			for mime, counts in stats.items() for byte, count in counts.items()])
-	db.commit()
 
 dirs = []
 for dir in sys.argv[1:]:
@@ -44,30 +46,32 @@ while len(dirs) > 0:
 			[dir]).fetchone()[0] == 0:
 		ncstats = dict()
 		magicstats = dict()
+		namestats = dict()
 		for path in files:
 			with io.open(path, 'rb') as infile:
 				counts = Counter(infile.read())
 			add(ncstats, ncmime(path), counts)
 			add(magicstats, magyc.from_file(path), counts)
+			pathbytes = os.path.basename(path).encode('utf-8')
+			add(namestats, 'filename', Counter(pathbytes))
 		record('nc', dir, ncstats)
 		record('magic', dir, magicstats)
+		record('name', dir, namestats)
+		db.commit()
 		print(dir)
 
-def dump(type):
+for kind in 'nc', 'magic', 'name':
 	total = dict()
 	for mime, count in db.execute('''select mime, sum(count) from counts
-			where type = ? group by mime''', [type]):
+			where kind = ? group by mime''', [kind]):
 		total[mime] = count
 
 	entropies = dict()
 	for mime, byte, count in db.execute('''select mime, byte, sum(count)
-			from counts where type = ? group by mime, byte''', [type]):
+			from counts where kind = ? group by mime, byte''', [kind]):
 		if mime not in entropies:
 			entropies[mime] = [0 for x in range(256)]
 		entropies[mime][byte] = -log2(count / total[mime])
 
-	with io.open(type + 'baseline.json', 'w') as outfile:
+	with io.open(kind + 'baseline.json', 'w') as outfile:
 		json.dump(entropies, outfile, indent=4)
-
-dump('nc')
-dump('magic')
