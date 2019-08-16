@@ -1,8 +1,11 @@
 mimetypealiases.dist.json
 mimetypemapping.dist.json
+libfileentropy.so
 baselines.sqlite
 magicbaseline.json
 ncbaseline.json
+namebaseline.json
 magic.pdf
 nc.pdf
+name.pdf
 __pycache__/
