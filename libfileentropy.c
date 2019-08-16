@@ -21,6 +21,7 @@ struct state {
 	size_t size;
 	float *within_block;
 	float *rel_to_file;
+	size_t counts[256];
 	float byteent[256];
 	uint8_t buffer[BUFSZ];
 	struct table tables[0];
@@ -48,32 +49,41 @@ void fe_free(struct state *st) {
 	free(st);
 }
 
-#define SAFE_REALLOC(ptr, size) \
-	do { \
-		ptr = realloc(ptr, size); \
-		assert(ptr); \
-	} while (0)
-
-size_t fe_prepare(struct state *st, size_t size, ...) {
-	size_t nblocks = (size + st->blocksize - 1) / st->blocksize;
-	if (nblocks > st->nalloc) {
-		SAFE_REALLOC(st->within_block, nblocks * sizeof(float));
-		SAFE_REALLOC(st->rel_to_file, nblocks * sizeof(float));
-		for (int i = 0; i < st->n_tables; i++)
-			SAFE_REALLOC(st->tables[i].result, nblocks * sizeof(float));
-		st->nalloc = nblocks;
+ssize_t fe_count_bytes(struct state *st, char *filename) {
+	FILE *fp = fopen(filename, "rb");
+	if (!fp)
+		return -ENOENT;
+	size_t nbytes = 0;
+	memset(st->counts, 0, sizeof(st->counts));
+	while (!feof(fp)) {
+		size_t len = fread(st->buffer, 1, st->blocksize, fp);
+		for (size_t i = 0; i < len; i++)
+			st->counts[st->buffer[i]]++;
+		nbytes += len;
 	}
-	st->nblocks = nblocks;
-	st->size = size;
+	fclose(fp);
+	st->size = nbytes;
+	return nbytes;
+}
 
-	va_list tables;
-	va_start(tables, size);
-	for (int i = 0; i < st->n_tables; i++)
-		memcpy(st->tables[i].byteent, va_arg(tables, float*), sizeof(st->tables[i].byteent));
-	assert(va_arg(tables, float*) == NULL);
-	va_end(tables);
+size_t *fe_get_bytecounts(struct state *st) {
+	return st->counts;
+}
 
-	return nblocks;
+void fe_get_byteent(struct state *st, float byteent[256]) {
+	size_t nbytes = 0;
+	for (int i = 0; i < 256; i++)
+		nbytes += st->counts[i];
+
+	for (int i = 0; i < 256; i++)
+		if (st->counts[i] > 0)
+			byteent[i] = -log2f(st->counts[i] / (float) nbytes);
+		else
+			// pretend that the byte would have been seen exactly once in twice
+			// as much data. this is an upper limit to its frequency (and a
+			// lower limit to its entropy): we didn't see it, so it's frequency
+			// is <0.5 times per nbytes.
+			byteent[i] = -log2f(.5f / nbytes);
 }
 
 static float entropy(size_t counts[256], float byteent[256], size_t total) {
@@ -83,37 +93,38 @@ static float entropy(size_t counts[256], float byteent[256], size_t total) {
 	return entropy / total;
 }
 
-ssize_t fe_calculate(struct state *st, char *filename) {
+#define SAFE_REALLOC(ptr, size) \
+	do { \
+		ptr = realloc(ptr, size); \
+		assert(ptr); \
+	} while (0)
+ssize_t fe_calculate_entropies(struct state *st, char *filename, ...) {
+	size_t nblocks = (st->size + st->blocksize - 1) / st->blocksize;
+	if (nblocks > st->nalloc) {
+		SAFE_REALLOC(st->within_block, nblocks * sizeof(float));
+		SAFE_REALLOC(st->rel_to_file, nblocks * sizeof(float));
+		for (int i = 0; i < st->n_tables; i++)
+			SAFE_REALLOC(st->tables[i].result, nblocks * sizeof(float));
+		st->nalloc = nblocks;
+	}
+	st->nblocks = nblocks;
+
+	va_list tables;
+	va_start(tables, filename);
+	for (int i = 0; i < st->n_tables; i++)
+		memcpy(st->tables[i].byteent, va_arg(tables, float*), sizeof(st->tables[i].byteent));
+	assert(va_arg(tables, float*) == NULL);
+	va_end(tables);
+
+	float byteent[256];
+	fe_get_byteent(st, byteent);
+
 	FILE *fp = fopen(filename, "rb");
 	if (!fp)
 		return -ENOENT;
 	size_t nbytes = 0;
-	size_t counts[256];
-	memset(counts, 0, sizeof(counts));
-	while (!feof(fp)) {
-		size_t len = fread(st->buffer, 1, st->blocksize, fp);
-		for (size_t i = 0; i < len; i++)
-			counts[st->buffer[i]]++;
-		nbytes += len;
-	}
-	for (int i = 0; i < 256; i++)
-		if (counts[i] > 0)
-			st->byteent[i] = -log2f(counts[i] / (float) nbytes);
-		else
-			// pretend that the byte would have been seen exactly once in twice
-			// as much data. this is an upper limit to its frequency (and a
-			// lower limit to its entropy): we didn't see it, so it's frequency
-			// is <0.5 times per nbytes.
-			st->byteent[i] = -log2f(.5f / nbytes);
-	fclose(fp);
-	if (nbytes != st->size)
-		return -EINVAL;
-
-	fp = fopen(filename, "rb");
-	if (!fp)
-		return -ENOENT;
-	nbytes = 0;
 	size_t block = 0;
+	size_t counts[256];
 	while (!feof(fp)) {
 		size_t len = fread(st->buffer, 1, st->blocksize, fp);
 		size_t blocks = (len + st->blocksize - 1) / st->blocksize;
@@ -130,7 +141,7 @@ ssize_t fe_calculate(struct state *st, char *filename) {
 				if (counts[i] > 0)
 					ent += log2f(counts[i] / (float) bytes) * counts[i];
 			st->within_block[block] = -ent / bytes;
-			st->rel_to_file[block] = entropy(counts, st->byteent, bytes);
+			st->rel_to_file[block] = entropy(counts, byteent, bytes);
 			for (int i = 0; i < st->n_tables; i++)
 				st->tables[i].result[block] = entropy(counts, st->tables[i].byteent, bytes);
 			block++;
@@ -138,29 +149,21 @@ ssize_t fe_calculate(struct state *st, char *filename) {
 		nbytes += len;
 	}
 	fclose(fp);
+
 	if (nbytes != st->size)
 		return -EINVAL;
-
-	return 0;
+	return nblocks;
 }
 
-void fe_get_byteent(struct state *st, float byteent[256]) {
-	memcpy(byteent, st->byteent, sizeof(st->byteent));
+float *fe_get_within_block(struct state *st) {
+	return st->within_block;
 }
 
-void fe_get_sequences(struct state *st, float *within_block, float *rel_to_file, ...) {
-	assert(within_block);
-	assert(rel_to_file);
-	memcpy(within_block, st->within_block, st->nblocks * sizeof(float));
-	memcpy(rel_to_file, st->rel_to_file, st->nblocks * sizeof(float));
+float *fe_get_rel_to_file(struct state *st) {
+	return st->rel_to_file;
+}
 
-	va_list tables;
-	va_start(tables, rel_to_file);
-	for (int i = 0; i < st->n_tables; i++) {
-		float *tab = va_arg(tables, float*);
-		assert(tab);
-		memcpy(tab, st->tables[i].result, st->nblocks * sizeof(float));
-	}
-	assert(va_arg(tables, float*) == NULL);
-	va_end(tables);
+float *fe_get_sequence(struct state *st, int tab) {
+	assert(tab < st->n_tables);
+	return st->tables[tab].result;
 }

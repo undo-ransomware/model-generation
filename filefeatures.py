@@ -31,7 +31,6 @@ def entropy(epb, counts):
 	return sum(epb[byte] * count for byte, count in counts.items()) / sum(counts.values())
 
 ENTROPY_BLOCKSIZE = 1024
-ZEROS = Counter(range(256)) # ones, so never-seen bytes have defined entropy
 magyc = Magic(mime=True)
 entroper = FileEntropy(1024, Baseline(ncbaseline), Baseline(magicbaseline))
 def extract_features(path):
@@ -42,9 +41,9 @@ def extract_features(path):
 	feats['mime.byext'] = extmime
 	feats['mime.libmagic'] = magicmime
 
-	size = os.stat(path).st_size
+	size, ebbv, ec_block, ec_file, ec_nc, ec_magic = entroper.calculate(
+			path, ncmime, magicmime)
 	feats['size'] = size
-	ebbv, ec_block, ec_file, ec_nc, ec_magic = entroper.calculate(path, size, ncmime, magicmime)
 	feats['entropy_by_byte_value'] = ebbv
 	feats['entropy_curve.within_block'] = ec_block
 	feats['entropy_curve.relative_to_file'] = ec_file

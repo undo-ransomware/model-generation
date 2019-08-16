@@ -10,6 +10,7 @@ from math import log2
 from magic import Magic
 from ncmime import ncmime
 from collections import Counter
+from fileentropy import FileEntropy
 
 db = sqlite3.connect('baselines.sqlite')
 # order of index columns carefully chosen so the the two "group by" queries can
@@ -18,7 +19,7 @@ db.execute('''create table if not exists counts(
 		kind text, mime text, byte integer, path text, count integer,
 		primary key(kind, mime, byte, path))''')
 
-ZEROS = Counter(range(256)) # ones, so never-seen bytes have defined entropy
+ZEROS = Counter()
 def add(counter, key, counts):
 	counter[key] = counter.get(key, ZEROS) + counts
 
@@ -32,6 +33,7 @@ for dir in sys.argv[1:]:
 	dirs.append(dir)
 
 magyc = Magic(mime=True)
+entroper = FileEntropy(1024)
 while len(dirs) > 0:
 	dir = dirs.pop()
 	files = []
@@ -48,8 +50,7 @@ while len(dirs) > 0:
 		magicstats = dict()
 		namestats = dict()
 		for path in files:
-			with io.open(path, 'rb') as infile:
-				counts = Counter(infile.read())
+			counts = Counter(entroper.count_bytes(path))
 			add(ncstats, ncmime(path), counts)
 			add(magicstats, magyc.from_file(path), counts)
 			pathbytes = os.path.basename(path).encode('utf-8')
@@ -58,7 +59,7 @@ while len(dirs) > 0:
 		record('magic', dir, magicstats)
 		record('name', dir, namestats)
 		db.commit()
-		print(dir)
+	print(dir)
 
 for kind in 'nc', 'magic', 'name':
 	total = dict()
@@ -70,7 +71,10 @@ for kind in 'nc', 'magic', 'name':
 	for mime, byte, count in db.execute('''select mime, byte, sum(count)
 			from counts where kind = ? group by mime, byte''', [kind]):
 		if mime not in entropies:
-			entropies[mime] = [0 for x in range(256)]
+			entropies[mime] = [-log2(0.5 / total[mime]) for x in range(256)]
+		# zeros should never have been inserted because Counter's don't return
+		# elements with zero counts
+		assert count > 0
 		entropies[mime][byte] = -log2(count / total[mime])
 
 	with io.open(kind + 'baseline.json', 'w') as outfile:
