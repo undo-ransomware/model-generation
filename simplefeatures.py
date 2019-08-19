@@ -4,7 +4,7 @@ import sys
 import json
 import numpy as np
 
-INFINITE_ENTROPY = 32
+INFINITE_ENTROPY = 24
 
 def stats(data, inkey, outprefix, outsuffix):
 	seq = data[inkey]
@@ -28,16 +28,16 @@ def simplify(path):
 			data['class'] = cls
 			
 			if data['size'] > 0:
-				#ebbv = data['entropy_by_byte_value']
-				#for i in range(256):
-				#	data['entropy.byte_%02x' % i] = ebbv[i]
+				ebbv = data['entropy_by_byte_value']
+				for i in range(256):
+					data['entropy.byte_%02x' % i] = ebbv[i]
 				stats(data, 'entropy_by_byte_value', 'entropy_', '.by_byte_value')
 			else:
 				# that's a bunch of infinities for an empty file. these infinities
 				# would break the stats, so just replace them with "fairly high"
 				# values.
-				#for i in range(256):
-				#	data['entropy.byte_%02x' % i] = INFINITE_ENTROPY
+				for i in range(256):
+					data['entropy.byte_%02x' % i] = INFINITE_ENTROPY
 				data['entropy_mean.by_byte_value'] = INFINITE_ENTROPY
 				data['entropy_stdev.by_byte_value'] = INFINITE_ENTROPY
 				del data['entropy_by_byte_value']

@@ -35,9 +35,11 @@ with io.open('pcaplot.tmp', 'w') as dataset:
 			for line in jsons:
 				data = json.loads(line)
 				del data['path']
-				data['class'] = 0
-				del data['mime.byext']
-				#del data['mime.libmagic']
+				#data['class'] = 0
+				#del data['mime.byext']
+				for i in range(1, 255):
+					del data['entropy.byte_%02x' % i]
+				del data['mime.libmagic']
 				data['valid_image'] = 1 if data['valid_image'] else 0
 				if headers is None:
 					headerSet = set(data.keys())
