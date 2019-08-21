@@ -22,5 +22,5 @@ for task in sys.argv[3:]:
 			target = os.path.join(outdir, task, filename)
 			if not os.path.isfile(target):
 				os.link(os.path.join(analysis, path), target)
-			# FIXME should write a log os fileops, too
+			# FIXME should write a log of fileops, too
 	print(task)

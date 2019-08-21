@@ -1,8 +1,8 @@
 features = read.csv("pcaplot.tmp", sep="\t", header=TRUE);
-mimes = factor(features$mime.byext)
-classes = features$class
+#mimes = factor(features$mime.byext)
+classes = as.integer(features$class) + 1
 features$class = NULL
-features$mime.byext = mimes
+#features$mime.byext = mimes
 
 featureNames = names(features);
 dim(features);
@@ -19,8 +19,7 @@ yv = pca$loadings[,2]
 
 W = 12
 H = 10
-# this is a horrible palette, but there's no good ones for >10 features anyway.
-palette(c(rgb(0,0,0,.1), 'green', 'red', rgb(0,0,1,.1)))
+palette(c(rgb(0,0,0,.1), rgb(0,0,1,.1)))
 
 # make a PDF of the corrent aspect ratio
 pdf("pcascatter1.pdf", width=W, height=W*ysd/xsd);

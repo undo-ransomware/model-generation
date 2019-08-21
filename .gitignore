@@ -10,3 +10,6 @@ magic.pdf
 nc.pdf
 name.pdf
 __pycache__/
+simplefeatures.npz
+simplefeatures.headers.json
+simplefeatures.info.json
