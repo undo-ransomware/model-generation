@@ -13,3 +13,5 @@ __pycache__/
 simplefeatures.npz
 simplefeatures.headers.json
 simplefeatures.info.json
+linear.pdf
+classification_linear.npz
