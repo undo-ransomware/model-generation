@@ -1,7 +1,6 @@
 import numpy as np
 import io
 import json
-from sklearn.model_selection import train_test_split
 
 _blob = None
 _headers = None
@@ -13,12 +12,14 @@ def _load_data():
 		_blob = np.load('simplefeatures.npz')
 def _load_headers():
 	global _headers
-	with io.open('simplefeatures.headers.json', 'r') as infile:
-		_headers = json.load(infile)
+	if _headers is None:
+		with io.open('simplefeatures.headers.json', 'r') as infile:
+			_headers = json.load(infile)
 def _load_infos():
 	global _info
-	with io.open('simplefeatures.info.json', 'r') as infile:
-		_info = json.load(infile)
+	if _info is None:
+		with io.open('simplefeatures.info.json', 'r') as infile:
+			_info = json.load(infile)
 
 def get_headers(features=True, entropies=True):
 	_load_headers()
@@ -29,7 +30,7 @@ def get_headers(features=True, entropies=True):
 		heads += ['entropy.byte_%02x' % i for i in range(256)]
 	return heads
 
-def get_data(features=True, entropies=True, test_size=0.2):
+def get_data(features=True, entropies=True):
 	_load_data()
 	feats = []
 	if features:
@@ -37,8 +38,8 @@ def get_data(features=True, entropies=True, test_size=0.2):
 	if entropies:
 		feats.append(_blob['byte_entropies'])
 	feats = np.concatenate(feats, axis=1)
-	return train_test_split(feats, _blob['classes'], test_size=test_size)
+	return (feats, _blob['classes'])
 
-def get_metadata(features=True, entropies=True, test_size=0.2):
+def get_metadata():
 	_load_infos()
 	return _info

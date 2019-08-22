@@ -1,9 +1,11 @@
 import tensorflow.compat.v1 as tf
 import numpy as np
 import simpledataset
+from sklearn.model_selection import train_test_split
 
 # training set size doesn't really matter; 90% and 1% behave almost identically
-x_train, x_test, y_train, y_test = simpledataset.get_data(test_size=0.1)
+x_train, x_test, y_train, y_test = train_test_split(*simpledataset.get_data(),
+		test_size=0.1)
 nclasses = 2
 nfeatures = len(x_train[0])
 
