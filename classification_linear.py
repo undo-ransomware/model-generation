@@ -1,21 +1,11 @@
 import tensorflow.compat.v1 as tf
 import numpy as np
-import io
-import json
-from sklearn.model_selection import train_test_split
+import simpledataset
 
-blob = np.load('simplefeatures.npz')
-classes = blob['classes']
-features = blob['features']
-byte_entropies = blob['byte_entropies']
-with io.open('simplefeatures.headers.json', 'r') as infile:
-	headers = json.load(infile)
+# training set size doesn't really matter; 90% and 1% behave almost identically
+x_train, x_test, y_train, y_test = simpledataset.get_data(test_size=0.1)
 nclasses = 2
-data = np.concatenate((features, byte_entropies), axis=1)
-nfeatures = len(data[0])
-
-# subdivide into training and testing data
-x_train, x_test, y_train, y_test = train_test_split(data, classes, test_size=0.2)
+nfeatures = len(x_train[0])
 
 # linear classifier: y = Wx + b
 x = tf.placeholder(tf.float32, [None, nfeatures])
