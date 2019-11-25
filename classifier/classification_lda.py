@@ -9,7 +9,7 @@ features, classes = simpledataset.get_data(entropies=True)
 meta = simpledataset.get_metadata()
 headers = simpledataset.get_headers(entropies=True)
 
-test_size=0.2
+test_size = 0.2
 
 def analyze(mime, selected, pdf):
 	feats = np.take(features, selected, axis=0)
@@ -21,7 +21,7 @@ def analyze(mime, selected, pdf):
 	prior_train = np.mean(y_train)
 	prior_test = np.mean(y_test)
 	if prior_train > 0.999 or prior_test < 0.001:
-		print('    guess by priors: train=%8.5f test=%8.5f' % (prior_train, prior_test))
+		print('    guessing by priors: train=%8.5f test=%8.5f' % (prior_train, prior_test))
 		weights = np.zeros(len(headers))
 		bias = prior_train
 		if prior_train < 0.5:
@@ -81,7 +81,7 @@ with PdfPages('linear.pdf') as pdf:
 			acc_train += atrain
 			acc_test += atest
 		else:
-			# less variables than observations. breaks any linear algebra.
+			# less observations than variables. guaranteed to break linear algebra.
 			other += selected
 	atrain, atest = analyze('other', other, pdf)
 	acc_train = (acc_train + atrain) / len(mimes) / (1 - test_size)

@@ -53,6 +53,7 @@ def extract_features(path):
 	feats['entropy_in_filename'] = entropy(namebaseline, namecounts)
 
 	try:
+		# FIXME doesn't work for all image formats!
 		with io.open(path, 'rb') as infile:
 			Image.open(infile)
 		valid_image = True

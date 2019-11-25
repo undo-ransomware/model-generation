@@ -1,0 +1,7 @@
+pcascatter*.pdf
+simplefeatures.npz
+simplefeatures.headers.json
+simplefeatures.info.json
+linear.pdf
+classification_linear.npz
+classification_lda.npz
