@@ -7,8 +7,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 UTC = timezone('UTC')
-LOCAL_VM = timezone('Europe/Berlin')
-LOCAL_CUCKOO = timezone('Europe/Berlin')
+LOCALTIME_VM = timezone('Europe/Berlin')
+LOCALTIME_CUCKOO = timezone('Europe/Berlin')
 NTFS_EPOCH = datetime(1601, 1, 1, tzinfo=UTC) # somewhere in the Middle Ages, because... Microsoft
 MAX_DURATION = timedelta(seconds=1)
 
@@ -17,12 +17,12 @@ def vm_to_utc(time):
 	# just don't run analyses during that time. chances are the ransomware
 	# will also screw up dates during DST changes. after all, TeslaCrypt
 	# doesn't even handle day rollover at the end of the month...
-	return datetime.fromtimestamp(time, LOCAL).astimezone(UTC)
+	return datetime.fromtimestamp(time, LOCALTIME_VM).astimezone(UTC)
 
 def cuckoo_to_utc(time):
 	# also fails for times during the late-night DST-end changeover, because
 	# cuckoo wisely doesn't include a timezone in the database field :(
-	return datetime.fromtimestamp(time, LOCAL).astimezone(UTC)
+	return datetime.fromtimestamp(time, LOCALTIME_CUCKOO).astimezone(UTC)
 
 def ntfs_to_utc(time):
 	# 100ns intervals since 1601-01-01
@@ -40,13 +40,21 @@ class FileStatus:
 		self.end = end
 	
 	@classmethod
-	def from_manifest(cls, status, disk, start='time_create'):
-		start_time = ntfs_to_utc(disk[start]) if start is not None else None
-		end_time = ntfs_to_utc(disk['time_write']) if start is not None else None
+	def from_manifest(cls, status, disk, analysis_start_time):
+		if analysis_start_time is not None:
+			start_time = ntfs_to_utc(disk['time_create'])
+			end_time = ntfs_to_utc(disk['time_write'])
+			if start_time < analysis_start_time:
+				# existing file was overwritten (and possibly moved), so
+				# creation time isn't indicative of the start of the write
+				# operation. indicate missing value instead.
+				start_time = None
+		else:
+			start_time = end_time = None
 		return cls(status, start_time, end_time)
 
 	def duration(self):
-		if self.end is None and self.start is None:
+		if self.end is None or self.start is None:
 			return None
 		return self.end - self.start
 
@@ -70,7 +78,7 @@ def check_before_after(base, disk):
 				base['time_create'], base['time_write'],
 				disk['time_create'], disk['time_write'])
 
-def parse_manifest(base_manifest, manifest, prefix):
+def parse_manifest(base_manifest, manifest, prefix, analysis_start):
 	disk_manifest = load_manifest(manifest)
 	fs = dict()
 	warn = defaultdict(list)
@@ -94,22 +102,18 @@ def parse_manifest(base_manifest, manifest, prefix):
 		if disk is None:
 			fs[path] = FileStatus.from_manifest('deleted', base, None)
 		elif base is None:
-			fs[path] = FileStatus.from_manifest('created', disk)
+			fs[path] = FileStatus.from_manifest('created', disk, analysis_start)
 		elif disk['md5'] != base['md5']:
-			# FIXME alwasys use "creation time before analysis start" instead
-			# (to correctly handle overwrite + rename, which keeps original
-			# creation time, but doesn't hit this case)
-			if disk['time_create'] == base['time_create']:
-				# existing file was overwritten, so creation time isn't
-				# indicative of the start of the write operation. using
-				# time_write gives zero duration, and hence no warning.
-				fs[path] = FileStatus.from_manifest('modified', disk,
-						'time_write')
-			else:
-				fs[path] = FileStatus.from_manifest('modified', disk)
+			fs[path] = FileStatus.from_manifest('modified', disk, analysis_start)
 		else:
 			fs[path] = FileStatus.from_manifest('ignored', disk, None)
 	return metainfo, fs, warn
+
+def load_report(file):
+	with io.open(file, 'rb') as fd:
+		temp = json.load(fd)
+	# TODO "dropped" might be useful to reconstruct temporary files
+	return temp['info'], temp.get('fileops', None)
 
 if len(sys.argv) < 3:
 	sys.stderr.write('usage: python meta.py /path/to/analyses task-id...\n')
@@ -127,13 +131,22 @@ base = load_manifest(base_manifest)
 
 for task in tasks:
 	manifest = os.path.join(analyses, task, 'disk.json')
-	if not os.path.isfile(manifest):
-		sys.stderr.write('%s doesn\'t exist!\n' % manifest)
+	report = os.path.join(analyses, task, 'reports', 'report.json')
+	if not os.path.isfile(manifest) or not os.path.isfile(report):
+		sys.stderr.write('%s or %s doesn\'t exist!\n' % (manifest, report))
 		sys.stderr.write('either %s isn\'t a task ID,\n' % task)
 		sys.stderr.write('or dump.py wasn\'t run on it.\n')
-		continue
+		sys.exit(1)
+	info, fileops = load_report(report)
+	if fileops is None:
+		sys.stderr.write('"fileops" key missing in report!\n' % manifest)
+		sys.stderr.write('cuckoo is probably missing the custom fileops.py\n')
+		sys.stderr.write('processing module.\n')
+	analysis_start_time = cuckoo_to_utc(info['started'])
 	
-	metainfo, status, warnings = parse_manifest(base, manifest, task)
+	metainfo, status_manifest, warnings = parse_manifest(base, manifest, task,
+			analysis_start_time)
+	status = status_manifest # TODO create status_fileops and compare
 	for path in status.keys():
 		duration = status[path].duration()
 		if duration is not None and duration > MAX_DURATION:
