@@ -5,12 +5,16 @@ import json
 from pytz import timezone
 from collections import defaultdict
 from datetime import datetime, timedelta
+from dateutil import parser as dateparser
 
 UTC = timezone('UTC')
 LOCALTIME_VM = timezone('Europe/Berlin')
-LOCALTIME_CUCKOO = timezone('Europe/Berlin')
+LOCALTIME_HOST = timezone('Europe/Berlin')
 NTFS_EPOCH = datetime(1601, 1, 1, tzinfo=UTC) # somewhere in the Middle Ages, because... Microsoft
 MAX_DURATION = timedelta(seconds=1)
+
+def isoparse(isotime):
+	return dateparser.isoparse(isotime).timestamp()
 
 def vm_to_utc(time):
 	# fails for times during the late-night DST-end changeover
@@ -19,10 +23,10 @@ def vm_to_utc(time):
 	# doesn't even handle day rollover at the end of the month...
 	return datetime.fromtimestamp(time, LOCALTIME_VM).astimezone(UTC)
 
-def cuckoo_to_utc(time):
+def host_to_utc(time):
 	# also fails for times during the late-night DST-end changeover, because
-	# cuckoo wisely doesn't include a timezone in the database field :(
-	return datetime.fromtimestamp(time, LOCALTIME_CUCKOO).astimezone(UTC)
+	# cuckoo wisely doesn't include a timezone :(
+	return datetime.fromtimestamp(time, LOCALTIME_HOST).astimezone(UTC)
 
 def ntfs_to_utc(time):
 	# 100ns intervals since 1601-01-01
@@ -38,20 +42,6 @@ class FileStatus:
 		self.status = status
 		self.start = start
 		self.end = end
-	
-	@classmethod
-	def from_manifest(cls, status, disk, analysis_start_time):
-		if analysis_start_time is not None:
-			start_time = ntfs_to_utc(disk['time_create'])
-			end_time = ntfs_to_utc(disk['time_write'])
-			if start_time < analysis_start_time:
-				# existing file was overwritten (and possibly moved), so
-				# creation time isn't indicative of the start of the write
-				# operation. indicate missing value instead.
-				start_time = None
-		else:
-			start_time = end_time = None
-		return cls(status, start_time, end_time)
 
 	def duration(self):
 		if self.end is None or self.start is None:
@@ -78,11 +68,14 @@ def check_before_after(base, disk):
 				base['time_create'], base['time_write'],
 				disk['time_create'], disk['time_write'])
 
-def parse_manifest(base_manifest, manifest, prefix, analysis_start):
+def parse_manifest(base_manifest, manifest, prefix, virtual_start, real_start):
+	# filesystem uses the real (initial) UTC time even though the Windows
+	# clock is set to the virtual time before the actual analysis starts
+	fs_time_delta = virtual_start - real_start
 	disk_manifest = load_manifest(manifest)
 	fs = dict()
 	warn = defaultdict(list)
-	metainfo = dict()
+	metadata = dict()
 
 	for path in set(base_manifest.keys()) | set(disk_manifest.keys()):
 		base = base_manifest.get(path, None)
@@ -97,23 +90,47 @@ def parse_manifest(base_manifest, manifest, prefix, analysis_start):
 			meta['filepath'] = disk['filepath']
 		if base is not None and disk is not None:
 			warn[path] += check_before_after(base, disk)
-		metainfo[path] = meta
+		metadata[path] = meta
 
-		if disk is None:
-			fs[path] = FileStatus.from_manifest('deleted', base, None)
-		elif base is None:
-			fs[path] = FileStatus.from_manifest('created', disk, analysis_start)
-		elif disk['md5'] != base['md5']:
-			fs[path] = FileStatus.from_manifest('modified', disk, analysis_start)
+		if disk is not None:
+			start_time = ntfs_to_utc(disk['time_create']) - fs_time_delta
+			end_time = ntfs_to_utc(disk['time_write']) - fs_time_delta
+			if start_time < virtual_start:
+				# an existing file was overwritten (and possibly moved), so
+				# creation time isn't indicative of the start of the write
+				# operation. indicate missing value instead.
+				start_time = None
+
+			if base is None:
+				fs[path] = FileStatus('created', start_time, end_time)
+			elif disk['md5'] != base['md5']:
+				fs[path] = FileStatus('modified', start_time, end_time)
+			else:
+				fs[path] = FileStatus('ignored', None, None)
 		else:
-			fs[path] = FileStatus.from_manifest('ignored', disk, None)
-	return metainfo, fs, warn
+			fs[path] = FileStatus('deleted', None, None)
+	return metadata, fs, warn
+
+def load_task_info(file):
+	with io.open(file, 'rb') as fd:
+		temp = json.load(fd)
+	# time that the Windows clock is set to during the analysis (usually just
+	# the submission time). fileops use this timeline.
+	virtual_start_time = vm_to_utc(isoparse(temp['clock']['$dt']))
+	# time on the server when analysis actually started. this is the initial
+	# time on the VM when it starts, and somehow the filesystem still uses
+	# this timeline even after setting the Windows clock.
+	real_start_time = host_to_utc(isoparse(temp['started_on']['$dt']))
+	metadata = { key: temp[key] for key in ['route', 'timeout', 'duration', 'id'] }
+	metadata['virtual_start_time'] = virtual_start_time.timestamp()
+	metadata['real_start_time'] = real_start_time.timestamp()
+	return metadata, virtual_start_time, real_start_time
 
 def load_report(file):
 	with io.open(file, 'rb') as fd:
 		temp = json.load(fd)
-	# TODO "dropped" might be useful to reconstruct temporary files
-	return temp['info'], temp.get('fileops', None)
+	# TODO "dropped" might also be useful, to reconstruct temporary files
+	return temp.get('fileops', None)
 
 if len(sys.argv) < 3:
 	sys.stderr.write('usage: python meta.py /path/to/analyses task-id...\n')
@@ -131,28 +148,40 @@ base = load_manifest(base_manifest)
 
 for task in tasks:
 	manifest = os.path.join(analyses, task, 'disk.json')
+	task_info = os.path.join(analyses, task, 'task.json')
 	report = os.path.join(analyses, task, 'reports', 'report.json')
-	if not os.path.isfile(manifest) or not os.path.isfile(report):
-		sys.stderr.write('%s or %s doesn\'t exist!\n' % (manifest, report))
-		sys.stderr.write('either %s isn\'t a task ID,\n' % task)
-		sys.stderr.write('or dump.py wasn\'t run on it.\n')
+	if not os.path.isfile(manifest):
+		sys.stderr.write('%s doesn\'t exist!\n' % task_info)
+		sys.stderr.write('%s probably isn\'t a valid task ID\n' % task)
 		sys.exit(1)
-	info, fileops = load_report(report)
+	if not os.path.isfile(task_info):
+		sys.stderr.write('%s doesn\'t exist!\n' % manifest)
+		sys.stderr.write('please run dump.py ON THE CUCKOO SERVER:\n')
+		sys.stderr.write('  python dump.py %s\n' % task)
+		sys.exit(1)
+	if not os.path.isfile(report):
+		sys.stderr.write('%s doesn\'t exist!\n' % report)
+		sys.stderr.write('reprocess the task (on the cuckoo server):\n')
+		sys.stderr.write('  cuckoo process -r %s\n' % task)
+		sys.exit(1)
+	fileops = load_report(report)
 	if fileops is None:
 		sys.stderr.write('"fileops" key missing in report!\n' % manifest)
 		sys.stderr.write('cuckoo is probably missing the custom fileops.py\n')
-		sys.stderr.write('processing module.\n')
-	analysis_start_time = cuckoo_to_utc(info['started'])
+		sys.stderr.write('processing module. information will be missing.\n')
 	
-	metainfo, status_manifest, warnings = parse_manifest(base, manifest, task,
-			analysis_start_time)
+	run_meta, virtual_start_time, real_start_time = load_task_info(task_info)
+	assert run_meta['id'] == int(task)
+	file_meta, status_manifest, warnings = parse_manifest(base, manifest, task,
+			real_start_time, virtual_start_time)
 	status = status_manifest # TODO create status_fileops and compare
+
 	for path in status.keys():
 		duration = status[path].duration()
 		if duration is not None and duration > MAX_DURATION:
-			warnings[path].append('operations took %s' % duration)
-			warnings[path].append('times %s %s' % (status[path].start, status[path].end))
-		print('%s %s t=%s' % (metainfo[path], status[path].status,
+			warnings[path].append('operation took %s (%s to %s)' % (duration,
+					status[path].start, status[path].end))
+		print('%s %s t=%s' % (file_meta[path], status[path].status,
 				status[path].time()))
 	for path, warns in warnings.items():
 		for warn in warns:
