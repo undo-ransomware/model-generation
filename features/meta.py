@@ -16,6 +16,7 @@ MAX_DURATION = timedelta(seconds=10)
 USERDIR = 'C:\\Users\\cuckoo'
 MAX_TIME_DIFF = 10 # seconds
 MAX_DURATION_DIFF = 1 # seconds
+WINDOWS_JUNK = ['AppData', 'NTUSER.DAT', 'NTUSER.DAT.LOG1']
 
 def isoparse(isotime):
 	return dateparser.isoparse(isotime).timestamp()
@@ -41,8 +42,38 @@ def ntfs_to_utc(time):
 	# at least the values are UTC not localtime here
 	return NTFS_EPOCH + timedelta(microseconds=(time + 5) / 10)
 
+def is_windows_junk(path):
+	if not path.startswith(USERDIR.lower()):
+		return True
+	for junk in WINDOWS_JUNK:
+		if path.startswith(('%s\\%s' % (USERDIR, junk)).lower()):
+			return True
+	return False
+
 class FileStatus:
-	def __init__(self, status, start=None, end=None):
+	def __init__(self, name, exists_before, exists_after, modified):
+		self.name = name
+		self.exists_before = exists_before
+		self.exists_after = exists_after
+		self.modified = modified
+
+class FileTrackingState:
+	# group:
+	#   existing: path already existed before the analysis (according to the
+	#             pre-analsysis filesystem manifest)
+	#   new: path was created during the analysis (usually by the sample)
+	#   phantom: path must have been created before the analysis started (eg.
+	#            by recentfiles.py or by Windows)
+	# status:
+	#   ignored: file wasn't touched during analysis
+	#   modified: file content was changed
+	#   deleted: file was deleted
+	# note that "new/ignored" and "phantom/ignored" are logically impossible.
+	# "new/ignored" is used internally, so if it shows up, there's a logic bug
+	# somwhere. files that would be "phantom/ignored" show up as
+	# inconsistencies between manifests and fileops.
+	def __init__(self, group, status, start=None, end=None):
+		self.group = group
 		self.status = status
 		self.start = start
 		self.end = end
@@ -106,13 +137,14 @@ def parse_manifest(base_manifest, manifest, prefix, virtual_start, real_start):
 				start_time = None
 
 			if base is None:
-				fs[path] = FileStatus('created', start_time, end_time)
+				# assume "new", ie. created during analysis. might also be "phantom".
+				fs[path] = FileTrackingState('new', 'modified', start_time, end_time)
 			elif disk['md5'] != base['md5']:
-				fs[path] = FileStatus('modified', start_time, end_time)
+				fs[path] = FileTrackingState('existing', 'modified', start_time, end_time)
 			else:
-				fs[path] = FileStatus('ignored')
+				fs[path] = FileTrackingState('existing', 'ignored')
 		else:
-			fs[path] = FileStatus('deleted')
+			fs[path] = FileTrackingState('existing', 'deleted')
 	return metadata, fs, warn
 
 def load_task_info(file):
@@ -136,94 +168,126 @@ def load_report(file):
 	# TODO "dropped" might also be useful, to reconstruct temporary files
 	return temp.get('fileops')
 
-fileops_to_filestatus = {
-	'nonexistent': {
-		'create': ('created', None),
-		'recreate': ('created', 'recreate nonexistent file (should be create)'),
-		'delete': ('nonexistent', 'deleting nonexistent file'),
-		# FIXME this happens due to recentfiles.py
-		'write': ('created', 'write to nonexistent file'),
-		'move_to': ('created', None)
-	}, 'created': {
-		'create': ('created', 'create existing file (should be recreate)'),
-		'recreate': ('created', None),
-		'delete': ('temp', None),
-		'write': ('created', None),
-		'move_to': ('created', None)
-	}, 'temp': {
-		'create': ('created', None),
-		'recreate': ('created', 'recreate nonexistent file (should be create)'),
-		'delete': ('temp', '(deleting nonexistent file)'),
-		'write': ('created', 'write to nonexistent file'),
-		'move_to': ('created', None)
-	}, 'ignored': {
-		'create': ('created', 'create existing file (should be recreate)'),
-		'recreate': ('modified', None),
-		'delete': ('deleted', None),
-		'write': ('modified', None),
-		'move_to': ('modified', None)
-	}, 'modified': {
-		'create': ('created', 'create existing file (should be recreate)'),
-		'recreate': ('modified', None),
-		'delete': ('deleted', None),
-		'write': ('modified', None),
-		'move_to': ('modified', None)
-	}, 'deleted': {
-		'create': ('modified', None),
-		'recreate': ('modified', 'recreate nonexistent file (should be create)'),
-		'delete': ('deleted', '(deleting nonexistent file)'),
-		'write': ('modified', 'write to nonexistent file'),
-		'move_to': ('modified', None)
-	}
-}
+class Tracker:
+	def __init__(self, base):
+		self.tracking = { path: FileTrackingState('existing', 'ignored')
+				for path in base.keys() }
+		self.warn = defaultdict(list)
+		self.original_name = dict()
 
-def iterate_fileops(fileops, analysis_start):
-	prev_time = analysis_start
-	for event in fileops:
-		time = vm_to_utc(event['time'])
-		assert time >= prev_time # events need to be sorted
-		prev_time = time
+	def assume_exists(self, time, path, op):
+		normpath = path.lower()
+		if normpath not in self.tracking:
+			# operation on a file we didn't know existed. assume it was created
+			# by something before analysis start, cuckoo's recentfiles.py being
+			# the usual culprit.
+			self.tracking[normpath] = FileTrackingState('phantom', 'ignored')
+		elif self.tracking[normpath].status == 'deleted':
+			# operation on a file we know shouldn't exist, eg. because we saw
+			# its deletion. still doesn't imply a ProcMon malfunction, but very
+			# suspicious nevertheless.
+			self.warn[normpath].append(
+					'inconsistent %s for nonexistent file at %s' % (op, time))
+			self.tracking[normpath].group = 'inconsistent'
 
-		op = event['op']
-		if op == 'file_created':
-			yield time, 'create', event['path']
-		elif op == 'file_written':
-			yield time, 'write', event['path']
-		elif op == 'file_deleted':
-			yield time, 'delete', event['path']
-		elif op == 'file_recreated':
-			yield time, 'recreate', event['path']
-		elif op == 'file_moved':
-			# TODO if "from", check that it exists
-			yield time, 'delete', event['from']
-			yield time, 'move_to', event['to']
-		elif op == 'file_copied':
-			yield time, 'move_to', event['to']
-		elif not op.startswith('directory_'):
-			raise 'unknown fileop %s' % op
+	def create(self, time, path, op):
+		normpath = path.lower()
+		if normpath in self.tracking and self.tracking[normpath].status != 'deleted':
+			self.warn[normpath].append('%s for existing file at %s' % (op, time))
+			self.tracking[normpath].group = 'inconsistent'
+
+	def truncate(self, time, path, op):
+		normpath = path.lower()
+		if normpath not in self.tracking:
+			self.tracking[normpath] = FileTrackingState('new', 'ignored')
+		elif self.tracking[normpath].status == 'deleted':
+			if self.tracking[normpath].group == 'phantom':
+				self.warn[normpath].append(
+						'phantom filename reused by %s at %s' % (op, time))
+				self.tracking[normpath].group = 'new'
+			self.tracking[normpath].status = 'modified'
+
+	def delete(self, time, path, op):
+		normpath = path.lower()
+		if normpath not in self.tracking or self.tracking[normpath].status == 'deleted':
+			# deletion of nonexistent file. indicative of strange programming
+			# practices, but not of a ProcMon malfunction.
+			self.warn[normpath].append(
+					'pointless %s for nonexistent file at %s' % (op, time))
+		if normpath not in self.tracking:
+			# deletion of a previously unknown file.
+			# assume it existed as a phantom file. if it didn't, how did the
+			# sample come up with its name?
+			self.tracking[normpath] = FileTrackingState('phantom', 'deleted')
+		self.tracking[normpath].status = 'deleted'
+
+	def write(self, time, path, op):
+		# write to deleted files handled in assume_exists above
+		self.tracking[path.lower()].status = 'modified'
+
+	def rename(self, time, old_path, new_path):
+		old_normpath = old_path.lower()
+		new_normpath = new_path.lower()
+		# propagate inconsistency and phantom state
+		if self.tracking[old_normpath].group == 'inconsistent':
+			self.tracking[new_normpath].group = 'inconsistent'
+		elif self.tracking[old_normpath].group == 'phantom':
+			self.tracking[new_normpath].group = 'phantom'
+		# record original filename. preserve case because for phantom files,
+		# we cannot get it from the pre-analysis filesystem manifest.
+		if old_normpath in self.original_name:
+			self.original_name[new_normpath] = self.original_name[old_normpath]
+			del self.original_name[old_normpath]
+		else:
+			self.original_name[new_normpath] = old_path
+
+	def update_times(self, time, path):
+		ts = self.tracking[path.lower()]
+		if ts.start is None:
+			ts.start = time
+		assert time >= ts.start
+		if ts.end is None or ts.end < time:
+			ts.end = time
 
 def parse_fileops(base, fileops, analysis_start):
-	filestatus = { path: FileStatus('ignored') for path in base.keys() }
-	warn = defaultdict(list)
+	tracker = Tracker(base)
 
-	for time, event, path in iterate_fileops(fileops, analysis_start):
-		normpath = path.lower()
-		if not normpath.startswith(USERDIR.lower()) or normpath.startswith(
-				(USERDIR + '\\AppData').lower()):
-			continue
+	prev_time = analysis_start
+	for op in fileops:
+		time = vm_to_utc(op['time'])
+		assert time >= prev_time # events need to be sorted
+		prev_time = time
+		path = op['path'] if 'path' in op else op['from']
 
-		if normpath not in filestatus:
-			filestatus[normpath] = FileStatus('nonexistent')
-		fs = filestatus[normpath]
-		fs.status, warning = fileops_to_filestatus[fs.status][event]
-		if fs.start is None:
-			fs.start = time
-		assert time >= fs.start
-		if fs.end is None or fs.end < time:
-			fs.end = time
-		if warning is not None:
-			warn[normpath] += ['%s at %s' % (warning, time)]
-	return filestatus, warn
+		try:
+			event = op['op']
+			if event == 'file_recreated' or event == 'file_written':
+				tracker.assume_exists(time, path, event)
+				tracker.write(time, path, event)
+			elif event == 'file_created':
+				tracker.create(time, path, event)
+				tracker.truncate(time, path, event)
+			elif event == 'file_deleted':
+				tracker.delete(time, path, event)
+			elif event == 'file_moved' or event == 'file_copied':
+				new_path = op['to']
+				tracker.assume_exists(time, path, event)
+				tracker.truncate(time, new_path, event)
+				tracker.write(time, new_path, event)
+				tracker.rename(time, path, new_path)
+				if event == 'file_moved':
+					tracker.delete(time, path, event)
+				tracker.update_times(time, new_path)
+			elif event.startswith('directory_'):
+				continue
+			else:
+				raise 'unknown fileop %s' % event
+			tracker.update_times(time, path)
+		except:
+			sys.stderr.write(json.dumps(op))
+			raise
+
+	return tracker.tracking, tracker.original_name, tracker.warn
 
 def check_duration(status, warnings):
 	for path in status.keys():
@@ -259,10 +323,11 @@ class Stats:
 			return inf
 		return sqrt(self._var / (self._n - 1))
 
-def format_status(filestatus, duration=None):
+def format_status(tracking, duration=None):
 	if duration is None:
-		duration = filestatus.duration()
-	return { 'status': filestatus.status, 'time': filestatus.time(),
+		duration = tracking.duration()
+	return { 'file_group': tracking.group, 'status': tracking.status,
+			'time': tracking.time(),
 			'duration': duration.total_seconds() if duration is not None else None }
 
 if len(sys.argv) < 3:
@@ -308,11 +373,13 @@ for task in tasks:
 	assert task_meta['id'] == int(task)
 	file_meta, status_manifest, warn_manifest = parse_manifest(base, manifest,
 			task, real_start_time, virtual_start_time)
-	status_fileops, warn_fileops = parse_fileops(base, fileops,
+	status_fileops, orig_filename, warn_fileops = parse_fileops(base, fileops,
 			virtual_start_time)
 	check_duration(status_manifest, warn_manifest)
 	check_duration(status_fileops, warn_fileops)
-	paths = set(status_manifest.keys()) | set(status_fileops.keys())
+	paths = { p
+			for p in set(status_manifest.keys()) | set(status_fileops.keys())
+			if not is_windows_junk(p) }
 	warnings = { p: warn_manifest[p] + warn_fileops[p] for p in paths }
 
 	delta_stats = Stats()
@@ -332,8 +399,9 @@ for task in tasks:
 			continue
 
 		if fs.status != ops.status:
-			warnings[path].append('%s on filesystem, but fileops indicate %s' %
-					(ops.status, ops.status))
+			warnings[path].append(
+					'%s/%s on filesystem, but fileops indicate %s/%s' %
+					(fs.group, fs.status, ops.group, ops.status))
 
 		# fileops is more reliable for duration of operations because it knows
 		# the actual operations that took place. it's also the only way to get
@@ -354,14 +422,14 @@ for task in tasks:
 			delta = fs.time() - ops.time()
 			delta_stats.update(delta)
 			if delta > MAX_TIME_DIFF:
-				warnings[p].append('time difference too big: %f / %f' % (
-						fs.time(), ops.time()))
+				warnings[path].append('time difference too big: %f / %f'
+						% (fs.time(), ops.time()))
 		if fs.duration() is not None and ops.duration() is not None:
 			delta = fs.duration().total_seconds() - ops.duration().total_seconds()
 			duration_stats.update(delta)
 			if delta > MAX_DURATION_DIFF:
-				warnings[p].append('duration difference too big: %f / %f' % (
-						fs.duration(), ops.duration()))
+				warnings[path].append('duration difference too big: %f / %f'
+						% (fs.duration(), ops.duration()))
 
 	for path in paths:
 		if path not in file_meta:
