@@ -12,11 +12,11 @@ UTC = timezone('UTC')
 LOCALTIME_VM = timezone('Europe/Berlin')
 LOCALTIME_HOST = timezone('Europe/Berlin')
 NTFS_EPOCH = datetime(1601, 1, 1, tzinfo=UTC) # somewhere in the Middle Ages, because... Microsoft
-MAX_DURATION = timedelta(seconds=10)
+MAX_DURATION = 10 # seconds
 USERDIR = 'C:\\Users\\cuckoo'
 MAX_TIME_DIFF = 10 # seconds
 MAX_DURATION_DIFF = 1 # seconds
-WINDOWS_JUNK = ['AppData', 'NTUSER.DAT', 'NTUSER.DAT.LOG1']
+WINDOWS_JUNK = ['AppData', 'NTUSER.DAT']
 
 def isoparse(isotime):
 	return dateparser.isoparse(isotime).timestamp()
@@ -81,7 +81,7 @@ class FileTrackingState:
 	def duration(self):
 		if self.end is None or self.start is None:
 			return None
-		return self.end - self.start
+		return (self.end - self.start).total_seconds()
 
 	def time(self):
 		return self.end.timestamp() if self.end is not None else None
@@ -96,12 +96,14 @@ def load_manifest(file):
 
 def check_before_after(base, disk):
 	if disk['filepath'] != base['filepath']:
-		yield 'filename case changed: %s / %s' % (base['filepath'], disk['filepath'])
+		yield ('filename_case_changed', 'filename case changed: %s / %s'
+				% (base['filepath'], disk['filepath']))
 	if disk['md5'] == base['md5'] and (disk['time_create'] != base['time_create']
 			or disk['time_write'] != base['time_write']):
-		yield 'ctime / mtime changed on ignored file: %d, %d / %d, %d' % (
-				base['time_create'], base['time_write'],
-				disk['time_create'], disk['time_write'])
+		yield ('unmodified_utimes_changed',
+				'ctime / mtime changed on ignored file: %d, %d / %d, %d'
+				% (base['time_create'], base['time_write'],
+				disk['time_create'], disk['time_write']))
 
 def parse_manifest(base_manifest, manifest, prefix, virtual_start, real_start):
 	# filesystem uses the real (initial) UTC time even though the Windows
@@ -166,7 +168,8 @@ def load_report(file):
 	with io.open(file, 'rb') as fd:
 		temp = json.load(fd)
 	# TODO "dropped" might also be useful, to reconstruct temporary files
-	return temp.get('fileops')
+	target = temp['target']['file']
+	return target, temp.get('fileops')
 
 class Tracker:
 	def __init__(self, base):
@@ -186,14 +189,15 @@ class Tracker:
 			# operation on a file we know shouldn't exist, eg. because we saw
 			# its deletion. still doesn't imply a ProcMon malfunction, but very
 			# suspicious nevertheless.
-			self.warn[normpath].append(
-					'inconsistent %s for nonexistent file at %s' % (op, time))
+			self.warn[normpath].append(('operation_on_nonexistent',
+					'inconsistent %s for nonexistent file at %s' % (op, time)))
 			self.tracking[normpath].group = 'inconsistent'
 
 	def create(self, time, path, op):
 		normpath = path.lower()
 		if normpath in self.tracking and self.tracking[normpath].status != 'deleted':
-			self.warn[normpath].append('%s for existing file at %s' % (op, time))
+			self.warn[normpath].append(('create_existing',
+					'%s for existing file at %s' % (op, time)))
 			self.tracking[normpath].group = 'inconsistent'
 
 	def truncate(self, time, path, op):
@@ -202,8 +206,8 @@ class Tracker:
 			self.tracking[normpath] = FileTrackingState('new', 'ignored')
 		elif self.tracking[normpath].status == 'deleted':
 			if self.tracking[normpath].group == 'phantom':
-				self.warn[normpath].append(
-						'phantom filename reused by %s at %s' % (op, time))
+				self.warn[normpath].append(('phantom_recreate',
+						'phantom filename reused by %s at %s' % (op, time)))
 				self.tracking[normpath].group = 'new'
 			self.tracking[normpath].status = 'modified'
 
@@ -212,8 +216,8 @@ class Tracker:
 		if normpath not in self.tracking or self.tracking[normpath].status == 'deleted':
 			# deletion of nonexistent file. indicative of strange programming
 			# practices, but not of a ProcMon malfunction.
-			self.warn[normpath].append(
-					'pointless %s for nonexistent file at %s' % (op, time))
+			self.warn[normpath].append(('delete_nonexistent',
+					'pointless %s for nonexistent file at %s' % (op, time)))
 		if normpath not in self.tracking:
 			# deletion of a previously unknown file.
 			# assume it existed as a phantom file. if it didn't, how did the
@@ -293,8 +297,9 @@ def check_duration(status, warnings):
 	for path in status.keys():
 		duration = status[path].duration()
 		if duration is not None and duration > MAX_DURATION:
-			warnings[path].append('operation took %s (%s to %s)' % (duration,
-					status[path].start, status[path].end))
+			warnings[path].append(('long_operation',
+					'operation took %s (%s to %s)'
+					% (duration, status[path].start, status[path].end)))
 
 class Stats:
 	def __init__(self):
@@ -323,18 +328,23 @@ class Stats:
 			return inf
 		return sqrt(self._var / (self._n - 1))
 
+	def aggregate_statistics(self):
+		if self._n == 0:
+			return None
+		return { 'mean': self.mean(), 'stdev': self.stdev(), 'n': self.n() }
+
 def format_status(tracking, duration=None):
 	if duration is None:
 		duration = tracking.duration()
 	return { 'file_group': tracking.group, 'status': tracking.status,
-			'time': tracking.time(),
-			'duration': duration.total_seconds() if duration is not None else None }
+			'time': tracking.time(), 'duration': duration }
 
-if len(sys.argv) < 3:
-	sys.stderr.write('usage: python meta.py /path/to/analyses task-id...\n')
+if len(sys.argv) < 4:
+	sys.stderr.write('usage: python meta.py /path/to/analyses path/to/output task-id...\n')
 	sys.exit(1)
 analyses = sys.argv[1]
-tasks = sys.argv[2:]
+output = sys.argv[2]
+tasks = sys.argv[3:]
 
 base_manifest = os.path.join(analyses, 'base.json')
 if not os.path.isfile(base_manifest):
@@ -362,7 +372,7 @@ for task in tasks:
 		sys.stderr.write('reprocess the task (on the cuckoo server):\n')
 		sys.stderr.write('  cuckoo process -r %s\n' % task)
 		sys.exit(1)
-	fileops = load_report(report)
+	targetinfo, fileops = load_report(report)
 	if fileops is None:
 		sys.stderr.write('"fileops" key missing in report!\n' % manifest)
 		sys.stderr.write('cuckoo is probably missing the custom fileops.py\n')
@@ -389,19 +399,29 @@ for task in tasks:
 		fs = status_manifest.get(path)
 		ops = status_fileops.get(path)
 
-		if fs is None:
-			warnings[path].append('missing in filesystem manifests')
-			status[path] = format_status(ops)
-			continue
 		if ops is None:
-			warnings[path].append('missing in fileops')
+			warnings[path].append(('missing_fileops',
+					'missing in fileops, %s/%s on filesystem'
+					% (fs.group, fs.status)))
 			status[path] = format_status(fs)
+			continue
+		if ops.group == 'phantom':
+			if path in orig_filename:
+				org = 'origin = %s' % orig_filename[path]
+			else:
+				org = 'unknown origin'
+			warnings[path].append(('phantom_file', 'phantom file, %s' % org))
+		if fs is None:
+			warnings[path].append(('missing_filesystem',
+					'missing in filesystem, fileops indicate %s/%s'
+					% (ops.group, ops.status)))
+			status[path] = format_status(ops)
 			continue
 
 		if fs.status != ops.status:
-			warnings[path].append(
+			warnings[path].append(('inconsistent_state',
 					'%s/%s on filesystem, but fileops indicate %s/%s' %
-					(fs.group, fs.status, ops.group, ops.status))
+					(fs.group, fs.status, ops.group, ops.status)))
 
 		# fileops is more reliable for duration of operations because it knows
 		# the actual operations that took place. it's also the only way to get
@@ -416,37 +436,55 @@ for task in tasks:
 		# fileops and filesystem manifest times.
 		status[path] = format_status(fs, duration)
 
-		# times are expected to always differ a bit. monitor that inconsistency
-		# with some statistics.
+		# times always differ a bit. statistically monitor that inconsistency.
 		if fs.time() is not None and ops.time() is not None:
 			delta = fs.time() - ops.time()
 			delta_stats.update(delta)
-			if delta > MAX_TIME_DIFF:
-				warnings[path].append('time difference too big: %f / %f'
-						% (fs.time(), ops.time()))
+			if abs(delta) > MAX_TIME_DIFF:
+				warnings[path].append(('timestamp_differs',
+						'timestamp discrepancy too big: %f / %f'
+						% (fs.time(), ops.time())))
 		if fs.duration() is not None and ops.duration() is not None:
-			delta = fs.duration().total_seconds() - ops.duration().total_seconds()
+			delta = fs.duration() - ops.duration()
 			duration_stats.update(delta)
-			if delta > MAX_DURATION_DIFF:
-				warnings[path].append('duration difference too big: %f / %f'
-						% (fs.duration(), ops.duration()))
+			if abs(delta) > MAX_DURATION_DIFF:
+				warnings[path].append(('duration_differs',
+						'duration discrepancy too big: %f / %f'
+						% (fs.duration(), ops.duration())))
 
 	for path in paths:
 		if path not in file_meta:
 			file_meta[path] = {}
 		file_meta[path].update(status[path])
-	with io.open('%s.json' % task, 'w') as fd:
-		json.dump(file_meta, fd)
+		file_meta[path]['original_filename'] = orig_filename[path] \
+				if path in orig_filename else None
 
-	# FIXME write structured warnings to a JSON file
-	for path, warns in warnings.items():
-		if warns == []:
-			continue
-		print('#%s %s:' % (task, path))
-		for warn in warns:
-			print('  %s' % warn)
-	# FIXME write these to a JSON file, too
-	print('#%s: %s' % (task, task_meta))
+	taskdir = os.path.join(output, task)
+	if not os.path.isdir(taskdir):
+		os.mkdir(taskdir)
+	with io.open(os.path.join(taskdir, 'fileops.json'), 'w') as fd:
+		for path, meta in file_meta.items():
+			json.dump(meta, fd)
+			fd.write('\n')
+	nwarn = 0
+	with io.open(os.path.join(taskdir, 'warnings.json'), 'w') as fd:
+		for path in file_meta.keys():
+			if path not in warnings or warnings[path] == []:
+				continue
+			warns = warnings[path]
+			if warns == []:
+				continue
+			for code, msg in warns:
+				json.dump({ 'path': path, 'code': code, 'msg': msg }, fd)
+				fd.write('\n')
+			nwarn += len(warns)
+
+	task_meta['timestamp_diff'] = delta_stats.aggregate_statistics()
+	task_meta['duration_diff'] = duration_stats.aggregate_statistics()
+	task_meta['sample'] = targetinfo['md5']
+	with io.open(os.path.join(taskdir, 'taskinfo.json'), 'w') as fd:
+		json.dump(task_meta, fd)
+	print('#%s: %s, %d warnings' % (task, targetinfo['md5'], nwarn))
 	print('  time difference: %f ±%f (n=%d)' % (delta_stats.mean(),
 			delta_stats.stdev(), delta_stats.n()))
 	print('  duration difference: %f ±%f (n=%d)' % (duration_stats.mean(),
