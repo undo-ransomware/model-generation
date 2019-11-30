@@ -2,6 +2,7 @@ import io
 import os
 import json
 from pytz import timezone
+from pytrie import StringTrie
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -79,6 +80,9 @@ def parse_manifest(base_manifest, disk_manifest, prefix, virtual_start, real_sta
 	fs = dict()
 	warn = defaultdict(list)
 	metadata = dict()
+	basenames = StringTrie((path, info['filepath'])
+			for path, info in base_manifest.items())
+	orig_name = dict()
 
 	for path in set(base_manifest.keys()) | set(disk_manifest.keys()):
 		base = base_manifest.get(path)
@@ -105,6 +109,16 @@ def parse_manifest(base_manifest, disk_manifest, prefix, virtual_start, real_sta
 				start_time = None
 
 			if base is None:
+				# find and link new files with a name suspiciously similar to
+				# an existing file. which for all observed samples means
+				# "adding an extra extension", complete with leading dot.
+				# don't strip the extension simply because that would make
+				# the origin ambiguous if there are victim files that differ
+				# only by extension (some do). not enforcing the extra dot,
+				# though.
+				basename = basenames.longest_prefix_value(path, None)
+				if basename is not None:
+					orig_name[path] = basename
 				# assume "new", ie. created during analysis. might also be "phantom".
 				fs[path] = FileTrackingState('new', 'modified', start_time, end_time)
 			elif disk['md5'] != base['md5']:
@@ -113,4 +127,4 @@ def parse_manifest(base_manifest, disk_manifest, prefix, virtual_start, real_sta
 				fs[path] = FileTrackingState('existing', 'ignored')
 		else:
 			fs[path] = FileTrackingState('existing', 'deleted')
-	return metadata, fs, warn
+	return metadata, fs, orig_name, warn

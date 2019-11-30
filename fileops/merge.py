@@ -38,17 +38,16 @@ class Stats:
 
 def merge_tracking_status(fs, ops, warn, delta_stats, duration_stats):
 	if ops is None:
-		warn.append(('missing_fileops', 'missing in fileops, %s/%s on filesystem'
-				% (fs.group, fs.status)))
 		# all other cases that the filesystem manifest parser can report
 		# involve existing files. if the report parser didn't catch those,
 		# then there's a significant logic bug somewhere!
 		assert fs.group == 'new' and fs.status == 'modified'
+		warn.append(('phantom_creation', 'unmonitored file creation'))
 		return fs
 	if fs is None:
-		if ops.group != 'phantom' or ops.status != 'deleted':
-			# deleted phantom files never show up in the filesystem
-			warn.append(('missing_filesystem',
+		if (ops.group != 'phantom' and ops.group != 'new') or ops.status != 'deleted':
+			# deleted phantom or temporary files never show up in the filesystem
+			warn.append(('missing_in_filesystem',
 					'missing in filesystem, fileops indicate %s/%s'
 					% (ops.group, ops.status)))
 		return ops
@@ -69,12 +68,14 @@ def merge_tracking_status(fs, ops, warn, delta_stats, duration_stats):
 		group = fs.group
 
 	if fs.status == 'deleted' and ops.status != 'deleted':
-		warn.append(('phantom_deletion', 'unmonitored file deletion'))
-	elif fs.status != 'deleted' and ops.status == 'deleted':
-		warn.append(('failed_deletion', 'deleted file still exists as %s/%s'
+		warn.append(('phantom_deletion',
+				'unmonitored file deletion, expected %s/%s'
 				% (fs.group, fs.status)))
 	elif fs.status == 'modified' and ops.status == 'ignored':
 		warn.append(('phantom_modify', 'unmonitored file modification'))
+	elif fs.status != 'deleted' and ops.status == 'deleted':
+		warn.append(('failed_deletion', 'deleted file still exists as %s/%s'
+				% (fs.group, fs.status)))
 	elif fs.status != ops.status:
 		warn.append(('inconsistent_state',
 				'%s/%s on filesystem, but fileops indicate %s/%s' %
@@ -107,7 +108,7 @@ def merge_tracking_status(fs, ops, warn, delta_stats, duration_stats):
 	# either all files hit the "missing in fileops" case, or all have good
 	# fileops values. thus there should never be a mix of files with
 	# fileops and filesystem manifest times.
-	return FileTrackingState(fs.group, fs.status, end=ops.end,
+	return FileTrackingState(group, fs.status, end=ops.end,
 			duration=timedelta(seconds=dur) if dur is not None else None)
 
 def is_windows_junk(path):

@@ -86,8 +86,9 @@ for task in tasks:
 		sys.stderr.write('processing module. information will be missing.\n')
 		fileops = []
 
-	file_meta, status_manifest, warn_manifest = parse_manifest(base,
-			disk_manifest, task, real_start_time, virtual_start_time)
+	file_meta, status_manifest, traceable_name, warn_manifest = \
+			parse_manifest(base, disk_manifest, task, real_start_time, \
+					virtual_start_time)
 	status_fileops, orig_filename, warn_fileops = parse_fileops(base, fileops,
 			virtual_start_time)
 	status, warnings, delta_stats, duration_stats, last_operation = \
@@ -96,7 +97,7 @@ for task in tasks:
 					virtual_stop_time, real_stop_time)
 
 	for path, tracking in status.items():
-		if path in status_fileops and status_fileops[path].group == 'phantom':
+		if path in status and status[path].group == 'phantom':
 			if path in orig_filename:
 				org = 'origin = %s' % orig_filename[path]
 			else:
@@ -108,7 +109,9 @@ for task in tasks:
 		file_meta[path].update({
 				'file_group': tracking.group, 'status': tracking.status,
 				'time': tracking.time(), 'duration': tracking.duration(),
-				'original_filename': orig_filename[path] \
+				'traceable_filename': traceable_name[path]
+						if path in traceable_name else None,
+				'original_filename': orig_filename[path]
 						if path in orig_filename else None })
 
 	taskdir = os.path.join(output, task)
