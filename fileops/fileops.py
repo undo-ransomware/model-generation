@@ -4,14 +4,13 @@ import sys
 import json
 from pytz import timezone
 from math import sqrt, nan, inf
-from collections import defaultdict
 from datetime import datetime, timedelta
 from dateutil import parser as dateparser
+from collections import defaultdict, Counter
 from report_parser import load_report, parse_fileops, vm_to_utc
 from manifest_parser import load_manifest, parse_manifest
 from merge import merge_status
-from config import LOCALTIME_HOST, USERDIR, WINDOWS_JUNK, MAX_FILEOP_DURATION, \
-		MAX_TIME_DIFF, MAX_DURATION_DIFF, TIMEOUT_MARGIN
+from config import LOCALTIME_HOST
 
 UTC = timezone('UTC')
 
@@ -147,3 +146,8 @@ for task in tasks:
 	print('  duration difference: %f ±%f (n=%d)' % (duration_stats.mean(),
 			duration_stats.stdev(), duration_stats.n()))
 	print('  margin to analysis timeout: %s' % (virtual_stop_time - last_operation))
+	print('  warnings:')
+	for warn, count in Counter([warn[0]
+			for item in warnings.values() for warn in item]).items():
+		print('    %s %d' % (warn, count))
+	print('')
