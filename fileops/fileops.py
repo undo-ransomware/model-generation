@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from dateutil import parser as dateparser
 from report_parser import load_report, parse_fileops, vm_to_utc
 from manifest_parser import load_manifest, parse_manifest
+from merge import merge_status
 from config import LOCALTIME_HOST, USERDIR, WINDOWS_JUNK, MAX_FILEOP_DURATION, \
 		MAX_TIME_DIFF, MAX_DURATION_DIFF, TIMEOUT_MARGIN
 
@@ -21,14 +22,6 @@ def host_to_utc(time):
 	# also fails for times during the late-night DST-end changeover, because
 	# cuckoo wisely doesn't include a timezone :(
 	return datetime.fromtimestamp(time, LOCALTIME_HOST).astimezone(UTC)
-
-def is_windows_junk(path):
-	if not path.startswith(USERDIR.lower()):
-		return True
-	for junk in WINDOWS_JUNK:
-		if path.startswith(('%s\\%s' % (USERDIR, junk)).lower()):
-			return True
-	return False
 
 def load_task_info(file):
 	with io.open(file, 'rb') as fd:
@@ -46,90 +39,6 @@ def load_task_info(file):
 	metadata['real_start_time'] = real_start_time.timestamp()
 	metadata['real_stop_time'] = stop_time.timestamp()
 	return metadata, virtual_start_time, real_start_time, stop_time
-
-def check_duration(status, warnings):
-	for path in status.keys():
-		duration = status[path].duration()
-		if duration is not None and duration > MAX_FILEOP_DURATION:
-			warnings[path].append(('long_operation',
-					'operation took %s (%s to %s)'
-					% (duration, status[path].start, status[path].end)))
-
-class Stats:
-	def __init__(self):
-		self._n = 0
-		self._mean = 0.0
-		self._var = 0.0
-
-	# this is Welford's method, which is numerically stable. see
-	# https://jonisalonen.com/2013/deriving-welfords-method-for-computing-variance/
-	def update(self, value):
-		self._n += 1
-		old_mean = self._mean
-		self._mean += (value - self._mean) / self._n
-		self._var += (value - self._mean) * (value - old_mean)
-
-	def n(self):
-		return self._n
-
-	def mean(self):
-		return self._mean if self._n > 1 else nan
-
-	def stdev(self):
-		if self._n == 0:
-			return nan
-		if self._n == 1:
-			return inf
-		return sqrt(self._var / (self._n - 1))
-
-	def aggregate_statistics(self):
-		if self._n == 0:
-			return None
-		return { 'mean': self.mean(), 'stdev': self.stdev(), 'n': self.n() }
-
-def merge_status(fs, ops, warn):
-	if ops is None:
-		warn.append(('missing_fileops', 'missing in fileops, %s/%s on filesystem'
-				% (fs.group, fs.status)))
-		return fs, None
-	if fs is None:
-		warn.append(('missing_filesystem',
-				'missing in filesystem, fileops indicate %s/%s'
-				% (ops.group, ops.status)))
-		return ops, None
-
-	if fs.status != ops.status:
-		warn.append(('inconsistent_state',
-				'%s/%s on filesystem, but fileops indicate %s/%s' %
-				(fs.group, fs.status, ops.group, ops.status)))
-	# times always differ a bit. statistically monitor that inconsistency.
-	if fs.time() is not None and ops.time() is not None:
-		delta = fs.time() - ops.time()
-		delta_stats.update(delta)
-		if abs(delta) > MAX_TIME_DIFF:
-			warn.append(('timestamp_differs',
-					'timestamp discrepancy too big: %f / %f'
-					% (fs.time(), ops.time())))
-	if fs.duration() is not None and ops.duration() is not None:
-		delta = fs.duration() - ops.duration()
-		duration_stats.update(delta)
-		if abs(delta) > MAX_DURATION_DIFF:
-			warn.append(('duration_differs',
-					'duration discrepancy too big: %f / %f'
-					% (fs.duration(), ops.duration())))
-
-	# fileops is more reliable for duration of operations because it knows
-	# the actual operations that took place. it's also the only way to get
-	# a duration for samples that overwrite existing files.
-	duration = ops.duration() if ops.duration() is not None else fs.duration()
-	# use filesystem status with fileops timestamp. only fileops has
-	# timestamps for deletions, so we need to use them for everything
-	# else, too, for maximum consistency.
-	# assuming that a sample either evades all monitoring or none of it,
-	# either all files hit the "missing in fileops" case, or all have good
-	# fileops values. thus there should never be a mix of files with
-	# fileops and filesystem manifest times.
-	return fs, duration
 
 if len(sys.argv) < 4:
 	sys.stderr.write('usage: python meta.py /path/to/analyses path/to/output task-id...\n')
@@ -150,15 +59,21 @@ for task in tasks:
 	manifest = os.path.join(analyses, task, 'disk.json')
 	task_info = os.path.join(analyses, task, 'task.json')
 	report = os.path.join(analyses, task, 'reports', 'report.json')
-	if not os.path.isfile(manifest):
+
+	if not os.path.isfile(task_info):
 		sys.stderr.write('%s doesn\'t exist!\n' % task_info)
 		sys.stderr.write('%s probably isn\'t a valid task ID\n' % task)
 		sys.exit(1)
-	if not os.path.isfile(task_info):
+	task_meta, virtual_start_time, real_start_time, real_stop_time = \
+			load_task_info(task_info)
+	virtual_stop_time = virtual_start_time - real_start_time + real_stop_time
+	assert task_meta['id'] == int(task)
+	if not os.path.isfile(manifest):
 		sys.stderr.write('%s doesn\'t exist!\n' % manifest)
 		sys.stderr.write('please run dump.py ON THE CUCKOO SERVER:\n')
 		sys.stderr.write('  python dump.py %s\n' % task)
 		sys.exit(1)
+	disk_manifest = load_manifest(manifest)
 	if not os.path.isfile(report):
 		sys.stderr.write('%s doesn\'t exist!\n' % report)
 		sys.stderr.write('reprocess the task (on the cuckoo server):\n')
@@ -171,60 +86,30 @@ for task in tasks:
 		sys.stderr.write('processing module. information will be missing.\n')
 		fileops = []
 
-	task_meta, virtual_start_time, real_start_time, real_stop_time = \
-			load_task_info(task_info)
-	virtual_stop_time = virtual_start_time - real_start_time + real_stop_time
-	assert task_meta['id'] == int(task)
-	file_meta, status_manifest, warn_manifest = parse_manifest(base, manifest,
-			task, real_start_time, virtual_start_time)
+	file_meta, status_manifest, warn_manifest = parse_manifest(base,
+			disk_manifest, task, real_start_time, virtual_start_time)
 	status_fileops, orig_filename, warn_fileops = parse_fileops(base, fileops,
 			virtual_start_time)
-	check_duration(status_manifest, warn_manifest)
-	check_duration(status_fileops, warn_fileops)
-	paths = { p
-			for p in set(status_manifest.keys()) | set(status_fileops.keys())
-			if not is_windows_junk(p) }
-	warnings = { p: warn_manifest[p] + warn_fileops[p] for p in paths }
+	status, warnings, delta_stats, duration_stats, last_operation = \
+			merge_status(status_manifest, warn_manifest, status_fileops,
+					warn_fileops, virtual_start_time, real_start_time,
+					virtual_stop_time, real_stop_time)
 
-	delta_stats = Stats()
-	duration_stats = Stats()
-	last_operation = virtual_start_time
-	status = dict()
-	for path in paths:
-		fs = status_manifest.get(path)
-		ops = status_fileops.get(path)
-
-		if ops is not None and ops.group == 'phantom':
+	for path, tracking in status.items():
+		if path in status_fileops and status_fileops[path].group == 'phantom':
 			if path in orig_filename:
 				org = 'origin = %s' % orig_filename[path]
 			else:
 				org = 'unknown origin'
 			warnings[path].append(('phantom_file', 'phantom file, %s' % org))
 
-		tracking, duration = merge_status(fs, ops, warnings[path])
-		if duration is None:
-			duration = tracking.duration()
-		status[path] = { 'file_group': tracking.group, 'duration': duration,
-				'status': tracking.status, 'time': tracking.time() }
-
-		if tracking.end is not None:
-			if tracking.end > last_operation:
-				last_operation = tracking.end
-			if tracking.end > virtual_stop_time:
-				warnings[path].append(('impossible_timestamp',
-						'operation at %f after nominal timeout at %f'
-						% (tracking.time(), virtual_stop_time.timestamp())))
-			elif virtual_stop_time - tracking.end < TIMEOUT_MARGIN:
-				warnings[path].append(('timeout_margin',
-						'operation at %f too close before timeout %f'
-						% (tracking.time(), virtual_stop_time.timestamp())))
-
-	for path in paths:
 		if path not in file_meta:
 			file_meta[path] = {}
-		file_meta[path].update(status[path])
-		file_meta[path]['original_filename'] = orig_filename[path] \
-				if path in orig_filename else None
+		file_meta[path].update({
+				'file_group': tracking.group, 'status': tracking.status,
+				'time': tracking.time(), 'duration': tracking.duration(),
+				'original_filename': orig_filename[path] \
+						if path in orig_filename else None })
 
 	taskdir = os.path.join(output, task)
 	if not os.path.isdir(taskdir):

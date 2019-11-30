@@ -31,13 +31,18 @@ class FileTrackingState:
 	#   modified: file content was changed
 	#   deleted: file was deleted
 	# note that "new/ignored" and "phantom/ignored" are logically impossible.
-	# "new/ignored" is used internally, so if it shows up, there's a logic bug
+	# they are used internally, so if they show up, there's a logic bug
 	# somwhere. files that would be "phantom/ignored" show up as
 	# inconsistencies between manifests and fileops.
-	def __init__(self, group, status, start=None, end=None):
+	def __init__(self, group, status, start=None, end=None, duration=None):
 		self.group = group
 		self.status = status
-		self.start = start
+		if start is not None:
+			self.start = start
+		elif duration is not None:
+			self.start = end - duration
+		else:
+			self.start = None
 		self.end = end
 
 	def duration(self):
@@ -67,11 +72,10 @@ def check_before_after(base, disk):
 				% (base['time_create'], base['time_write'],
 				disk['time_create'], disk['time_write']))
 
-def parse_manifest(base_manifest, manifest, prefix, virtual_start, real_start):
+def parse_manifest(base_manifest, disk_manifest, prefix, virtual_start, real_start):
 	# filesystem uses the real (initial) UTC time even though the Windows
 	# clock is set to the virtual time before the actual analysis starts
 	fs_time_delta = virtual_start - real_start
-	disk_manifest = load_manifest(manifest)
 	fs = dict()
 	warn = defaultdict(list)
 	metadata = dict()
