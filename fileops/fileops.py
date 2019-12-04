@@ -85,15 +85,13 @@ for task in tasks:
 		sys.stderr.write('processing module. information will be missing.\n')
 		fileops = []
 
-	file_meta, status_manifest, traceable_name, warn_manifest = \
-			parse_manifest(base, disk_manifest, task, real_start_time, \
-					virtual_start_time)
-	status_fileops, orig_filename, warn_fileops = parse_fileops(base, fileops,
+	file_meta, status_manifest, traceable_name = parse_manifest(base,
+			disk_manifest, task, real_start_time, virtual_start_time)
+	status_fileops, orig_filename = parse_fileops(base, fileops,
 			virtual_start_time)
-	status, warnings, delta_stats, duration_stats, last_operation = \
-			merge_status(status_manifest, warn_manifest, status_fileops,
-					warn_fileops, virtual_start_time, real_start_time,
-					virtual_stop_time, real_stop_time)
+	status, delta_stats, duration_stats, last_operation = merge_status(
+			status_manifest, status_fileops, virtual_start_time,
+			real_start_time, virtual_stop_time, real_stop_time)
 
 	for path, tracking in status.items():
 		if path in status and status[path].group == 'phantom':
@@ -101,7 +99,7 @@ for task in tasks:
 				org = 'origin = %s' % orig_filename[path]
 			else:
 				org = 'unknown origin'
-			warnings[path].append(('phantom_file', 'phantom file, %s' % org))
+			tracking.warn('phantom_file', 'phantom file, %s' % org)
 
 		if path not in file_meta:
 			file_meta[path] = {}
@@ -111,27 +109,26 @@ for task in tasks:
 				'traceable_filename': traceable_name[path]
 						if path in traceable_name else None,
 				'original_filename': orig_filename[path]
-						if path in orig_filename else None })
+						if path in orig_filename else None,
+				'inconsistent': tracking.inconsistent })
 
 	taskdir = os.path.join(output, task)
 	if not os.path.isdir(taskdir):
 		os.mkdir(taskdir)
 	with io.open(os.path.join(taskdir, 'fileops.json'), 'w') as fd:
-		for path, meta in file_meta.items():
-			json.dump(meta, fd)
+		for path in status.keys():
+			json.dump(file_meta[path], fd)
 			fd.write('\n')
-	nwarn = 0
+	warnings = Counter()
 	with io.open(os.path.join(taskdir, 'warnings.json'), 'w') as fd:
-		for path in file_meta.keys():
-			if path not in warnings or warnings[path] == []:
+		for path, tracking in status.items():
+			if len(tracking.warnings) == 0:
 				continue
-			warns = warnings[path]
-			if warns == []:
-				continue
-			for code, msg in warns:
-				json.dump({ 'path': path, 'code': code, 'msg': msg }, fd)
-				fd.write('\n')
-			nwarn += len(warns)
+			line = { 'path': path }
+			line.update(tracking.warnings)
+			json.dump(line, fd)
+			fd.write('\n')
+			warnings.update(tracking.warnings.keys())
 
 	task_meta['timestamp_diff'] = delta_stats.aggregate_statistics()
 	task_meta['duration_diff'] = duration_stats.aggregate_statistics()
@@ -139,15 +136,14 @@ for task in tasks:
 	task_meta['last_operation'] = last_operation.timestamp()
 	with io.open(os.path.join(taskdir, 'taskinfo.json'), 'w') as fd:
 		json.dump(task_meta, fd)
-	print('#%s: %s, duration %ds, %d warnings'
-			% (task, targetinfo['md5'], task_meta['duration'], nwarn))
+	print('#%s: %s, duration %ds'
+			% (task, targetinfo['md5'], task_meta['duration']))
 	print('  time difference: %f ±%f (n=%d)' % (delta_stats.mean(),
 			delta_stats.stdev(), delta_stats.n()))
 	print('  duration difference: %f ±%f (n=%d)' % (duration_stats.mean(),
 			duration_stats.stdev(), duration_stats.n()))
 	print('  margin to analysis timeout: %s' % (virtual_stop_time - last_operation))
 	print('  warnings:')
-	for warn, count in Counter([warn[0]
-			for item in warnings.values() for warn in item]).items():
+	for warn, count in warnings.items():
 		print('    %s %d' % (warn, count))
-	print('')
+	print()

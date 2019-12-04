@@ -29,9 +29,9 @@ def load_report(file):
 
 class Tracker:
 	def __init__(self, base):
-		self.tracking = { path: FileTrackingState('existing', 'ignored')
-				for path in base.keys() }
-		self.warn = defaultdict(list)
+		self.tracking = defaultdict(lambda: FileTrackingState('new', 'ignored'))
+		for path in base.keys():
+			self.tracking[path] = FileTrackingState('existing', 'ignored')
 		self.original_name = dict()
 
 	def assume_exists(self, time, path, op):
@@ -45,35 +45,42 @@ class Tracker:
 			# operation on a file we know shouldn't exist, eg. because we saw
 			# its deletion. still doesn't imply a ProcMon malfunction, but very
 			# suspicious nevertheless.
-			self.warn[normpath].append(('operation_on_nonexistent',
-					'inconsistent %s for nonexistent file at %s' % (op, time)))
-			self.tracking[normpath].group = 'inconsistent'
+			self.tracking[normpath].warn('operation_on_nonexistent',
+					'inconsistent %s for nonexistent file at %s' % (op, time))
+			self.tracking[normpath].inconsistent = True
 
 	def create(self, time, path, op):
 		normpath = path.lower()
 		if normpath in self.tracking and self.tracking[normpath].status != 'deleted':
-			self.warn[normpath].append(('create_existing',
-					'%s for existing file at %s' % (op, time)))
-			self.tracking[normpath].group = 'inconsistent'
+			# this means NtCreateFile returned FILE_CREATED for a file that we
+			# know should already exist. Microsoft docs suggest that it should
+			# be either FILE_OVERWRITTEN or FILE_SUPERSEDED (ie. a recreate)
+			# but don't document (as in, at all) what is returned when :(
+			# in any case, it might also happen if the file was deleted but
+			# ProcMon didn't catch it. instances of that exist for other
+			# samples that don't trigger this case here. warn, but don't mark
+			# as inconsistent, analogous to unmonitored deletions.
+			self.tracking[normpath].warn('create_existing',
+					'%s for existing file at %s' % (op, time))
 
 	def truncate(self, time, path, op):
 		normpath = path.lower()
-		if normpath not in self.tracking:
-			self.tracking[normpath] = FileTrackingState('new', 'ignored')
-		elif self.tracking[normpath].status == 'deleted':
+		if self.tracking[normpath].status == 'deleted':
 			if self.tracking[normpath].group == 'phantom':
-				self.warn[normpath].append(('phantom_recreate',
-						'phantom filename reused by %s at %s' % (op, time)))
+				self.tracking[normpath].warn('phantom_recreate',
+						'phantom filename reused by %s at %s' % (op, time))
 				self.tracking[normpath].group = 'new'
 			self.tracking[normpath].status = 'modified'
 
 	def delete(self, time, path, op):
 		normpath = path.lower()
 		if normpath not in self.tracking or self.tracking[normpath].status == 'deleted':
-			# deletion of nonexistent file. indicative of strange programming
-			# practices, but not of a ProcMon malfunction.
-			self.warn[normpath].append(('delete_nonexistent',
-					'pointless %s for nonexistent file at %s' % (op, time)))
+			# deletion of nonexistent file. some samples seem to do this to be
+			# fail-"safe" when moving to a new name fails. they could of
+			# course also check the return status on that move, but malware
+			# isn't always that level of quality...
+			self.tracking[normpath].warn('delete_nonexistent',
+					'pointless %s for nonexistent file at %s' % (op, time))
 		if normpath not in self.tracking:
 			# deletion of a previously unknown file.
 			# assume it existed as a phantom file. if it didn't, how did the
@@ -89,9 +96,9 @@ class Tracker:
 		old_normpath = old_path.lower()
 		new_normpath = new_path.lower()
 		# propagate inconsistency and phantom state
-		if self.tracking[old_normpath].group == 'inconsistent':
-			self.tracking[new_normpath].group = 'inconsistent'
-		elif self.tracking[old_normpath].group == 'phantom':
+		if self.tracking[old_normpath].inconsistent:
+			self.tracking[new_normpath].inconsistent = True
+		if self.tracking[old_normpath].group == 'phantom':
 			self.tracking[new_normpath].group = 'phantom'
 		# record original filename. preserve case because for phantom files,
 		# we cannot get it from the pre-analysis filesystem manifest.
@@ -105,8 +112,8 @@ class Tracker:
 			warn = ('move_across_dir',
 					'moved across directories: %s -> %s at %s'
 					% (old_normpath, new_normpath, time))
-			self.warn[new_normpath].append(warn)
-			self.warn[old_normpath].append(warn)
+			self.tracking[new_normpath].warn(*warn)
+			self.tracking[old_normpath].warn(*warn)
 
 	def update_times(self, time, path):
 		ts = self.tracking[path.lower()]
@@ -154,4 +161,4 @@ def parse_fileops(base, fileops, analysis_start):
 			sys.stderr.write(json.dumps(op))
 			raise
 
-	return tracker.tracking, tracker.original_name, tracker.warn
+	return tracker.tracking, tracker.original_name

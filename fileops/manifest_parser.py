@@ -38,6 +38,8 @@ class FileTrackingState:
 	def __init__(self, group, status, start=None, end=None, duration=None):
 		self.group = group
 		self.status = status
+		self.inconsistent = False
+		self.warnings = dict()
 		if start is not None:
 			self.start = start
 		elif duration is not None:
@@ -45,6 +47,9 @@ class FileTrackingState:
 		else:
 			self.start = None
 		self.end = end
+
+	def warn(self, code, msg):
+		self.warnings[code] = msg
 
 	def duration(self):
 		if self.end is None or self.start is None:
@@ -62,23 +67,11 @@ def load_manifest(file):
 			by_path[data['filepath'].lower()] = data
 	return by_path
 
-def check_before_after(base, disk):
-	if disk['filepath'] != base['filepath']:
-		yield ('filename_case_changed', 'filename case changed: %s / %s'
-				% (base['filepath'], disk['filepath']))
-	if disk['md5'] == base['md5'] and (disk['time_create'] != base['time_create']
-			or disk['time_write'] != base['time_write']):
-		yield ('unmodified_utimes_changed',
-				'ctime / mtime changed on ignored file: %d, %d / %d, %d'
-				% (base['time_create'], base['time_write'],
-				disk['time_create'], disk['time_write']))
-
 def parse_manifest(base_manifest, disk_manifest, prefix, virtual_start, real_start):
 	# filesystem uses the real (initial) UTC time even though the Windows
 	# clock is set to the virtual time before the actual analysis starts
 	fs_time_delta = virtual_start - real_start
 	fs = dict()
-	warn = defaultdict(list)
 	metadata = dict()
 	basenames = StringTrie((path, info['filepath'])
 			for path, info in base_manifest.items())
@@ -95,8 +88,6 @@ def parse_manifest(base_manifest, disk_manifest, prefix, virtual_start, real_sta
 		if disk is not None:
 			meta['after'] = os.path.normpath(os.path.join(prefix, disk['path']))
 			meta['filepath'] = disk['filepath']
-		if base is not None and disk is not None:
-			warn[path] += check_before_after(base, disk)
 		metadata[path] = meta
 
 		if disk is not None:
@@ -127,4 +118,17 @@ def parse_manifest(base_manifest, disk_manifest, prefix, virtual_start, real_sta
 				fs[path] = FileTrackingState('existing', 'ignored')
 		else:
 			fs[path] = FileTrackingState('existing', 'deleted')
-	return metadata, fs, orig_name, warn
+
+		if base is not None and disk is not None:
+			if disk['filepath'] != base['filepath']:
+				fs[path].warn('filename_case_changed',
+						'filename case changed: %s / %s'
+						% (base['filepath'], disk['filepath']))
+			if disk['md5'] == base['md5'] and \
+					(disk['time_create'] != base['time_create']
+					or disk['time_write'] != base['time_write']):
+				fs[path].warn('unmodified_utimes_changed',
+						'ctime / mtime changed on ignored file: %d, %d / %d, %d'
+						% (base['time_create'], base['time_write'],
+						disk['time_create'], disk['time_write']))
+	return metadata, fs, orig_name
