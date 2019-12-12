@@ -19,6 +19,60 @@ def append_warnings(tgt, src, fileinfo):
 		for code, msg in src[normpath].items():
 			tgt.append(msg)
 
+def track_by(fileops, tracking_key):
+	# create a copy of the list so we can delete items from the original set
+	# during the iteration
+	tracked = [(data['filepath'].lower(), data[tracking_key].lower())
+			for data in fileops.values() if data[tracking_key] is not None]
+	for tgt, src in tracked:
+		if src not in fileops:
+			# file was created in temp directory and then moved to target.
+			# note that moving an existing file to the temp directory would
+			# be tracked.
+			continue
+		yield fileops[src], fileops[tgt]
+		del fileops[src]
+		del fileops[tgt]
+
+def summarize(fileops):
+	# tracked renames, ie. where we have fileops showing the rename
+	for source, target in track_by(fileops, 'original_filename'):
+		if target['traceable_filename'] is not None:
+			warn = []
+			if target['traceable_filename'].lower() != source['filepath'].lower():
+				warn = ['target name traces to %s instead'
+						% target['traceable_filename']]
+			yield 'modify_addext', source, target, warn
+		else:
+			yield 'modify_rename', source, target, []
+
+	# untracked renames we can infer by the sample using derived names
+	for source, target in track_by(fileops, 'traceable_filename'):
+		# TODO remove phantom_modify and phantom_deletion
+		yield 'modify_addext', source, target, []
+
+	# untracked renames where we cannot infer the original name, as well as
+	# just general creations and deletions
+	for single in fileops.values():
+		if single['file_group'] in ('existing', 'phantom'):
+			if single['status'] == 'modified':
+				yield 'modify', single, single, []
+			elif single['status'] == 'deleted':
+				yield 'delete', single, None, []
+			elif single['status'] == 'ignored':
+				# phantom/ignored should never be reported
+				assert single['file_group'] == 'existing'
+				yield 'ignore', single, single, []
+			else:
+				assert False # no other values defined
+		elif single['file_group'] == 'new':
+			if single['status'] == 'modified':
+				yield 'create', None, single, []
+			else: # new/ignored should never appear
+				assert single['status'] == 'deleted'
+		else:
+			assert False # no other values defined
+
 for task in tasks:
 	taskdir = os.path.join(indir, task)
 	fileops = dict()
@@ -34,53 +88,8 @@ for task in tasks:
 			del data['path']
 			warnings[path] = data
 
-	ops = list()
-
-	# tracked renames, ie. where we have fileops showing the rename.
-	# create a copy of the list so we can delete items from the original set
-	tracked = [(data['filepath'].lower(), data['original_filename'].lower())
-			for data in fileops.values() if data['original_filename'] is not None]
-	for tgt, src in tracked:
-		source = fileops[src]
-		target = fileops[tgt]
-		if target['traceable_filename'] is None:
-			ops.append(('modify_rename', source, target, []))
-		else:
-			warn = []
-			if target['traceable_filename'].lower() != src:
-				warn.append('target name traces to %s instead'
-						% target['traceable_filename'])
-			ops.append(('modify_addext', source, target, warn))
-		del fileops[src]
-		del fileops[tgt]
-
-	# untracked renames we can infer by the sample using derived names
-	untracked = [(data['filepath'].lower(), data['traceable_filename'].lower())
-			for data in fileops.values() if data['traceable_filename'] is not None]
-	for tgt, src in untracked:
-		warn = []
-		source = fileops[src]
-		target = fileops[tgt]
-		# TODO flag untracked if phantom_modify and phantom_deletion
-		ops.append(('modify_addext', source, target, []))
-		del fileops[src]
-		del fileops[tgt]
-
-	for single in fileops.values():
-		warn = []
-		if single['file_group'] in ('existing', 'phantom') and single['status'] == 'modified':
-			ops.append(('modify', single, single, []))
-		elif single['file_group'] in ('existing', 'phantom') and single['status'] == 'deleted':
-			ops.append(('delete', single, None, []))
-		elif single['file_group'] in ('existing', 'phantom') and single['status'] == 'ignored':
-			ops.append(('ignore', single, single, []))
-		elif single['file_group'] == 'new' and single['status'] == 'modified':
-			ops.append(('create', None, single, []))
-		else:
-			print('unhandled %s/%s for %s' % (single['file_group'], single['status'], single['filepath']))
-
 	timediff = Stats()
-	for op, source, target, warn in ops:
+	for op, source, target, warn in summarize(fileops):
 		if source == target:
 			if source['file_group'] not in ('existing', 'phantom'):
 				warn.append('path not existing, but %s/%s' % (source['file_group'], source['status']))
