@@ -102,7 +102,8 @@ for task in tasks:
 			tracking.warn('phantom_file', 'phantom file, %s' % org)
 
 		if path not in file_meta:
-			file_meta[path] = {}
+			file_meta[path] = { 'before': None, 'after': None,
+					'filepath': path }
 		file_meta[path].update({
 				'file_group': tracking.group, 'status': tracking.status,
 				'time': tracking.time(), 'duration': tracking.duration(),

@@ -103,6 +103,9 @@ class Tracker:
 		# record original filename. preserve case because for phantom files,
 		# we cannot get it from the pre-analysis filesystem manifest.
 		if old_normpath in self.original_name:
+			# should be harmless, but may need attention if it happens
+			self.tracking[new_normpath].warn('multiple_rename',
+					'moved more than once, intermediate=%s' % old_normpath)
 			self.original_name[new_normpath] = self.original_name[old_normpath]
 			del self.original_name[old_normpath]
 		else:
